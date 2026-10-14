@@ -230,6 +230,33 @@ never cables fails with the last count observed and a task log that says why. If
 reappears despite the wait, that is no longer the race - read the `task-worker` log for the
 creation error before blaming the change under test.
 
+### A race between a merge and the next branch
+
+The merge task of a proposed change returns once the data is in `main`. Infrahub then starts a
+post-merge flow that runs the generators the merge affected on `main`, and each generator creates
+its `CoreGeneratorGroup` and `CoreGraphQLQueryGroup` nodes there. A branch created while that flow
+runs does not contain those nodes. When the next proposed change runs the same generator as a
+check, its `CoreGeneratorGroupUpsert` finds the group's human-friendly ID on `main` but not on the
+branch, Infrahub answers `NODE_NOT_FOUND` ("uses this human-friendly ID, but does not exist on this
+branch"), the check fails and the merge is refused.
+
+Two tests create a branch right after a merge and lost this race:
+
+| Test | Branch, created after merging | Generator running on `main` at that moment |
+| ---- | ----------------------------- | ------------------------------------------- |
+| `test_50_pop::test_05_pop_merges_to_main` | `add-pop-1`, after `add-dc-arista` | `create_dc` |
+| `test_70_day2::test_03_edit_lands_in_main` | `day2-edit-dc-arista`, after `add-segment-opsmill` | `create_segment` |
+
+The `test_70` case fails on every run from Infrahub 1.11.6. From that version, the post-merge flow
+of the segment selects only `create_segment`, which then starts about two seconds after the branch
+is created. Earlier versions also ran `create_dc` first, which takes about a minute, and the
+proposed change ran its own generator before the group reached `main`.
+
+`h.merge_proposed_change` now calls `h.wait_for_post_merge_flow`, which waits until Infrahub's
+`branch-merge-post-process` flow for the merged branch has finished. The generators run inside that
+flow, so a test that merges through the helper creates its next branch from the regenerated `main`.
+If Infrahub renames that flow, the wait times out with no run found: update `POST_MERGE_FLOW`.
+
 ### Authentication
 
 Clients get their token from the `infrahub_api_token` fixture, which reads the token

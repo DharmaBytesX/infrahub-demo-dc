@@ -14,13 +14,14 @@ import asyncio
 import logging
 import os
 import subprocess  # noqa: S404 - infrahubctl is the documented interface for these steps
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from infrahub_sdk import InfrahubClient
 from infrahub_sdk.graphql import Mutation
-from infrahub_sdk.task.models import TaskState
+from infrahub_sdk.task.models import TaskFilter, TaskState
 from infrahub_testcontainers.container import PROJECT_ENV_VARIABLES
 
 from . import constants as c
@@ -698,6 +699,58 @@ async def failing_check_details(client: InfrahubClient, validators: list[Any], l
     return "\n".join(lines) or "    (no failing checks recorded)"
 
 
+POST_MERGE_FLOW = "branch-merge-post-process"
+"""Infrahub's flow that regenerates what a merge affected, tagged with the merged branch."""
+
+FINISHED_TASK_STATES = {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.CRASHED}
+"""Task states after which a task does no more work."""
+
+
+async def wait_for_post_merge_flow(
+    client: InfrahubClient,
+    source_branch: str,
+    timeout: int = c.GENERATOR_TIMEOUT,
+) -> list[str]:
+    """Wait until Infrahub's post-merge flow for a merged branch has finished.
+
+    The merge task returns once the data is in ``main``. Infrahub then starts a post-merge flow that
+    runs the generators the merge affected, and each generator creates its ``CoreGeneratorGroup``
+    and ``CoreGraphQLQueryGroup`` nodes on ``main``. A branch created before those nodes exist does
+    not contain them, so the next proposed change's generator checks fail with ``NODE_NOT_FOUND``
+    when they upsert the same groups on that branch.
+
+    The generators run inside that flow, so its end is the point after which ``main`` holds their
+    groups. The flow starts a few seconds after the merge task completes, so the wait also covers the
+    time before it appears.
+
+    Args:
+        client: Client pointed at the default branch.
+        source_branch: The branch that was just merged.
+        timeout: Seconds to wait.
+
+    Returns:
+        The title and state of each post-merge flow run found for the branch.
+
+    Raises:
+        AssertionError: If no run appears, or one is still running, when the timeout elapses.
+    """
+
+    async def check() -> tuple[bool, list[str]]:
+        runs = await client.task.filter(filter=TaskFilter(branch=source_branch, workflow=[POST_MERGE_FLOW]))
+        done = bool(runs) and all(run.state in FINISHED_TASK_STATES for run in runs)
+        return done, [f"{run.title}: {run.state.value}" for run in runs]
+
+    started = time.monotonic()
+    runs = await wait_for(
+        check,
+        f"the post-merge flow of {source_branch} to finish",
+        timeout=timeout,
+        interval=c.DEFAULT_POLL_INTERVAL,
+    )
+    log.info("Post-merge flow of %s finished after %.0fs: %s", source_branch, time.monotonic() - started, runs)
+    return runs
+
+
 async def merge_proposed_change(
     client: InfrahubClient,
     pc_id: str,
@@ -712,6 +765,10 @@ async def merge_proposed_change(
     When it did not land, the message carries the merge task's own logs and the validator conclusions.
     Infrahub refuses to merge a proposed change with failing checks, so the validator that failed is
     almost always the answer, and reading it out of the assertion beats going back to the container.
+
+    It returns only once Infrahub's post-merge flow has finished (see
+    :func:`wait_for_post_merge_flow`), so a branch the caller creates next starts from the
+    regenerated ``main``.
 
     Args:
         client: Client pointed at the default branch.
@@ -751,6 +808,7 @@ async def merge_proposed_change(
             f"  All validators:\n{summarize_validators(validators or [])}"
         )
 
+    await wait_for_post_merge_flow(client, source_branch=str(pc.source_branch.value))
     return state
 
 
