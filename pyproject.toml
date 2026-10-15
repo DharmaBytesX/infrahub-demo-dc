@@ -113,6 +113,6 @@ filterwarnings = [
 # (test_00_..., test_10_..., ...). Do not reorder or randomise collection.
 markers = [
     "core: workflows every pull request must keep working. Run with `-m 'not extended'`.",
-    "extended: additional workflows run on Infrahub-version bump branches and on a tier=full manual dispatch, advisory (non-blocking) while the upstream group-member resolution fault is open. Adds ~30-40 minutes.",
+    "extended: additional workflows run on Infrahub-version bump branches and on a tier=full manual dispatch; blocking on bump branches, advisory (non-blocking) on a dispatch while the upstream group-member resolution fault is open. Adds ~30-40 minutes.",
     "offline: an integration-suite test that reads only repository files and needs no deployment.",
 ]
